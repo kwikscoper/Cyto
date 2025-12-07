@@ -1,0 +1,18 @@
+# Build artifacts
+target
+lean/.lake
+.buildx-cache
+node_modules
+
+# Lockfiles / generated manifests (kept out of source-only history)
+Cargo.lock
+lean/lake-manifest.json
+
+# Binary assets (tracked outside the source-only history)
+*.webp
+
+# Local-only files
+secrets
+notes.txt
+.env.test
+!.env.test.example
