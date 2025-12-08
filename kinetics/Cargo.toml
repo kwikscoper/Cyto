@@ -1,0 +1,33 @@
+[package]
+name = "kinetics"
+version = "0.1.0"
+edition = "2024"
+description = "Semantic/thermodynamics/kinetics layer for fluidsim"
+
+[lib]
+name = "kinetics"
+path = "src/lib.rs"
+
+[dependencies]
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Logging
+log.workspace = true
+
+# Hashing (for species ID compatibility)
+ahash.workspace = true
+
+# Bitflags for semantic flags
+bitflags.workspace = true
+
+# Serialization (for Lean interop via JSON)
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# Testing utilities
+
+[features]
+default = []
