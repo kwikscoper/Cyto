@@ -312,21 +312,23 @@ impl SemanticSnapshot {
         }
     }
 
-    /// Get a tile by coarse coordinates.
-    pub fn tile(&self, x: u32, y: u32) -> Option<&SemanticTile> {
+    /// Row-major index of a coarse coordinate, or `None` if out of bounds.
+    fn linear_index(&self, x: u32, y: u32) -> Option<usize> {
         if x >= self.coarse_width || y >= self.coarse_height {
             return None;
         }
-        let idx = (y * self.coarse_width + x) as usize;
+        Some((y * self.coarse_width + x) as usize)
+    }
+
+    /// Get a tile by coarse coordinates.
+    pub fn tile(&self, x: u32, y: u32) -> Option<&SemanticTile> {
+        let idx = self.linear_index(x, y)?;
         self.tiles.get(idx)
     }
 
     /// Get a mutable tile by coarse coordinates.
     pub fn tile_mut(&mut self, x: u32, y: u32) -> Option<&mut SemanticTile> {
-        if x >= self.coarse_width || y >= self.coarse_height {
-            return None;
-        }
-        let idx = (y * self.coarse_width + x) as usize;
+        let idx = self.linear_index(x, y)?;
         self.tiles.get_mut(idx)
     }
 
