@@ -152,6 +152,12 @@ impl KineticsConfig {
         if self.conservation_tolerance <= 0.0 {
             return Err("Conservation tolerance must be positive".to_string());
         }
+        if self.any_rules_enabled() && !self.enable_lean {
+            return Err(
+                "Lean-backed rules are required when semantic rule evaluation is enabled"
+                    .to_string(),
+            );
+        }
         if let (true, Some(path)) = (self.enable_lean, self.lean_library_path.as_ref())
             && !path.exists()
         {
