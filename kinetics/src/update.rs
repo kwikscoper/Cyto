@@ -104,7 +104,7 @@ impl MiscibilityOverride {
         Self {
             species_a,
             species_b,
-            coefficient,
+            coefficient: coefficient.clamp(0.0, 1.0),
         }
     }
 }
