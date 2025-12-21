@@ -1,0 +1,88 @@
+/-
+  Catalyst.lean — Generic catalyst-gated rule helpers plus the hexokinase demo.
+
+  The primitive here models reactions that:
+  - consume up to two reactants,
+  - produce up to two products,
+  - require a catalyst species to be present,
+  - do not consume the catalyst.
+-/
+
+import CytoRules.Types
+import CytoRules.AcidBase
+
+open CytoRules
+
+namespace CytoRules.Catalyst
+
+/-- Hexokinase turnover number ($k_{cat}$) near room temperature in s⁻¹. -/
+def hexokinaseTurnoverNumber : Float := 95.0
+
+/-- Michaelis constant for glucose in mol/L. -/
+def hexokinaseKmGlucose : Float := 4.7e-5
+
+/-- Michaelis constant for ATP in mol/L. -/
+def hexokinaseKmAtp : Float := 3.7e-4
+
+/-- Effective rate before fluidsim applies its global kinetics scale. -/
+def hexokinaseEffectiveRate : Float := 5.0e-3
+
+/-- Keep the demo thermally neutral until a better parameterization is added. -/
+def catalystThermalDelta : Float := 0.0
+
+/-- Ids of fluid tiles holding both reactants and the catalyst. -/
+def catalyzedTileIds
+    (snap : Snapshot)
+    (reactantA reactantB catalyst : String) : Array Nat :=
+  CytoRules.AcidBase.applicableTileIds snap #[reactantA, reactantB, catalyst]
+
+def makeCatalyzedRule
+    (reactionName reactantA reactantB productA productB catalyst kineticModel : String)
+    (rateConstant effectiveRate : Float)
+    (kmReactantA kmReactantB : Option Float)
+    (enthalpyDelta gibbsFreeEnergy entropyDelta activationEnergy : Float)
+    (tileIds : Array Nat) : ReactionRule := {
+  reactionName := reactionName
+  reactantA := reactantA
+  reactantB := reactantB
+  productA := productA
+  productB := productB
+  catalyst := some catalyst
+  kineticModel := kineticModel
+  rateConstant := rateConstant
+  effectiveRate := effectiveRate
+  kmReactantA := kmReactantA
+  kmReactantB := kmReactantB
+  enthalpyDelta := enthalpyDelta
+  gibbsFreeEnergy := gibbsFreeEnergy
+  entropyDelta := entropyDelta
+  activationEnergy := activationEnergy
+  isReversible := false
+  applicableTileIds := tileIds
+}
+
+/-- Evaluate catalyst-gated reactions against the snapshot. -/
+def evaluate (snap : Snapshot) : Array ReactionRule :=
+  let hexokinaseTiles := catalyzedTileIds snap "Glucose" "ATP" "Hexokinase"
+  let rules : Array ReactionRule := #[]
+  let rules :=
+    if hexokinaseTiles.isEmpty then rules else rules.push <| makeCatalyzedRule
+      "hexokinase_phosphorylation"
+      "Glucose"
+      "ATP"
+      "G6P"
+      "ADP"
+      "Hexokinase"
+      "michaelis_menten"
+      hexokinaseTurnoverNumber
+      hexokinaseEffectiveRate
+      (some hexokinaseKmGlucose)
+      (some hexokinaseKmAtp)
+      catalystThermalDelta
+      catalystThermalDelta
+      catalystThermalDelta
+      catalystThermalDelta
+      hexokinaseTiles
+  rules
+
+end CytoRules.Catalyst
