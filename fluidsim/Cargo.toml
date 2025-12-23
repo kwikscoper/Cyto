@@ -1,0 +1,30 @@
+[package]
+name = "fluidsim"
+version = "0.1.0"
+edition = "2024"
+description = "GPU fine-grid chemical transport, reaction, leak, enzyme, and thermal compute passes"
+
+[lib]
+name = "fluidsim"
+path = "src/lib.rs"
+
+[dependencies]
+# GPU / Vulkan + shader compilation
+ash.workspace = true
+gpu-allocator.workspace = true
+shaderc.workspace = true
+raw-window-handle.workspace = true
+
+# Math / data
+bytemuck.workspace = true
+glam.workspace = true
+ahash.workspace = true
+
+# Diagnostics
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+
+# Low-frequency semantic/kinetics layer
+kinetics.workspace = true
