@@ -4,10 +4,12 @@
 //! binary via `LeanBridge`, and deserializes the resulting reaction rules
 //! into `ReactionDirective`s.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    KineticsConfig, KineticsError, SemanticSnapshot, SemanticUpdate,
+    KineticsConfig, KineticsError, SemanticSnapshot, SemanticUpdate, SpeciesId,
     engine::RuleEvaluator,
     lean_bridge::LeanBridge,
     update::{MichaelisMentenKinetics, ReactionDirective, ReactionId, ReactionKineticsModel},
@@ -125,6 +127,17 @@ impl LeanEvaluator {
     fn build_lean_snapshot(snapshot: &SemanticSnapshot) -> LeanSnapshot {
         let species_names = snapshot.species_table.species_names.clone();
 
+        // Resolve `SpeciesId -> name` once instead of doing a linear scan for
+        // every species amount in every tile. First occurrence wins, matching
+        // the previous `position()`-based behavior.
+        let mut name_by_id: HashMap<SpeciesId, &str> =
+            HashMap::with_capacity(snapshot.species_table.species_ids.len());
+        for (idx, &id) in snapshot.species_table.species_ids.iter().enumerate() {
+            if let Some(name) = species_names.get(idx) {
+                name_by_id.entry(id).or_insert(name.as_str());
+            }
+        }
+
         let tiles = snapshot
             .tiles
             .iter()
@@ -133,14 +146,9 @@ impl LeanEvaluator {
                     .species_mean_molarity
                     .iter()
                     .filter_map(|a| {
-                        // Look up the name by matching species_id -> index
-                        let idx = snapshot
-                            .species_table
-                            .species_ids
-                            .iter()
-                            .position(|&id| id == a.species_id)?;
+                        let name = name_by_id.get(&a.species_id)?;
                         Some(LeanSpeciesAmount {
-                            name: species_names[idx].clone(),
+                            name: (*name).to_string(),
                             molarity: a.value,
                         })
                     })
