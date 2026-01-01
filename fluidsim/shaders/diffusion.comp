@@ -1,0 +1,204 @@
+#version 450
+
+// Diffusion compute shader for species transport
+//
+// This shader performs one bounded electrochemical transport step:
+//   c_new[i] = c[i] + D * dt * sum(edge_scale * (c_neighbor - c_i)
+//                                 + electrochemical_drift)
+// The electrochemical term approximates a Nernst-Planck migration flux using
+// local net-charge disparities as a proxy for the unresolved electric field.
+// When adjacent cells differ in net charge, ionic transport is accelerated in
+// the charge-relaxing direction so local charge pockets dissipate quickly while
+// remaining stable enough for real-time stepping.
+//
+// Layout: [species][cell] where cell = y * width + x
+// Dispatch: (ceil(cell_count / 256), species_count, 1)
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+    uint species_count;
+    uint species_index;  // 0xFFFFFFFF = process all via gl_WorkGroupID.y
+    float diffusion_rate;
+    float dt;
+    uint _pad[2];
+};
+
+// Binding 0: Source concentration buffer (read)
+layout(set = 0, binding = 0) readonly buffer SrcConcentrations {
+    float src_conc[];
+};
+
+// Binding 1: Destination concentration buffer (write)
+layout(set = 0, binding = 1) writeonly buffer DstConcentrations {
+    float dst_conc[];
+};
+
+// Binding 2: Solid mask (1 = solid, 0 = fluid)
+layout(set = 0, binding = 2) readonly buffer SolidMask {
+    uint solid_mask[];
+};
+
+// Binding 3: Diffusion coefficients per species
+layout(set = 0, binding = 3) readonly buffer DiffusionCoeffs {
+    float diffusion_coeffs[];
+};
+
+// Binding 4: Integer ionic charge / valence per species
+layout(set = 0, binding = 4) readonly buffer SpeciesCharges {
+    int species_charges[];
+};
+
+const float CHARGE_RELAXATION_BOOST = 5.0;
+const float ELECTROCHEMICAL_DRIFT = 4.0;
+const float MAX_EDGE_SCALE = 6.0;
+const float MAX_CHARGE_DELTA = 1.5;
+
+float cell_net_charge(uint cell_idx, uint cell_count) {
+    float net_charge = 0.0;
+    for (uint s = 0; s < species_count; s++) {
+        int z = species_charges[s];
+        if (z == 0) {
+            continue;
+        }
+
+        net_charge += float(z) * src_conc[s * cell_count + cell_idx];
+    }
+    return net_charge;
+}
+
+float edge_charge_scale(int species_charge, float charge_delta) {
+    if (species_charge == 0) {
+        return 1.0;
+    }
+
+    float charge_disparity = min(abs(charge_delta), MAX_CHARGE_DELTA);
+    float boost = 1.0 + CHARGE_RELAXATION_BOOST * min(charge_disparity, 1.0);
+    return min(boost, MAX_EDGE_SCALE);
+}
+
+float electrochemical_flux(
+    int species_charge,
+    float current_c,
+    float neighbor_c,
+    float charge_delta
+) {
+    if (species_charge == 0) {
+        return 0.0;
+    }
+
+    float bounded_charge_delta = clamp(charge_delta, -MAX_CHARGE_DELTA, MAX_CHARGE_DELTA);
+    float average_concentration = 0.5 * (current_c + neighbor_c);
+    return ELECTROCHEMICAL_DRIFT
+        * float(species_charge)
+        * bounded_charge_delta
+        * average_concentration;
+}
+
+void main() {
+    uint cell_index = gl_GlobalInvocationID.x;
+    uint species_idx = gl_WorkGroupID.y;
+    
+    uint cell_count = width * height;
+    
+    // Bounds check
+    if (cell_index >= cell_count) {
+        return;
+    }
+    
+    // Check if this cell is solid
+    if (solid_mask[cell_index] != 0) {
+        // Solid cells maintain zero concentration
+        dst_conc[species_idx * cell_count + cell_index] = 0.0;
+        return;
+    }
+    
+    // Get cell coordinates
+    uint x = cell_index % width;
+    uint y = cell_index / width;
+    
+    // Current concentration
+    float c = src_conc[species_idx * cell_count + cell_index];
+    
+    // Get diffusion coefficient for this species
+    float D = diffusion_coeffs[species_idx] * diffusion_rate;
+    int z = species_charges[species_idx];
+    float charge_mobility_scale = (z == 0)
+        ? 1.0
+        : (1.0 / max(float(abs(z)), 1.0));
+    D *= charge_mobility_scale;
+    float current_net_charge = cell_net_charge(cell_index, cell_count);
+    
+    // Accumulate flux from neighbors (4-connected)
+    float flux = 0.0;
+    int neighbor_count = 0;
+    
+    // Left neighbor
+    if (x > 0) {
+        uint left_idx = cell_index - 1;
+        if (solid_mask[left_idx] == 0) {
+            float c_left = src_conc[species_idx * cell_count + left_idx];
+            float left_net_charge = cell_net_charge(left_idx, cell_count);
+            float charge_delta = left_net_charge - current_net_charge;
+            float edge_scale = edge_charge_scale(z, charge_delta);
+            flux += (c_left - c) * edge_scale;
+            flux += electrochemical_flux(z, c, c_left, charge_delta);
+            neighbor_count++;
+        }
+    }
+    
+    // Right neighbor
+    if (x + 1 < width) {
+        uint right_idx = cell_index + 1;
+        if (solid_mask[right_idx] == 0) {
+            float c_right = src_conc[species_idx * cell_count + right_idx];
+            float right_net_charge = cell_net_charge(right_idx, cell_count);
+            float charge_delta = right_net_charge - current_net_charge;
+            float edge_scale = edge_charge_scale(z, charge_delta);
+            flux += (c_right - c) * edge_scale;
+            flux += electrochemical_flux(z, c, c_right, charge_delta);
+            neighbor_count++;
+        }
+    }
+    
+    // Top neighbor
+    if (y > 0) {
+        uint top_idx = cell_index - width;
+        if (solid_mask[top_idx] == 0) {
+            float c_top = src_conc[species_idx * cell_count + top_idx];
+            float top_net_charge = cell_net_charge(top_idx, cell_count);
+            float charge_delta = top_net_charge - current_net_charge;
+            float edge_scale = edge_charge_scale(z, charge_delta);
+            flux += (c_top - c) * edge_scale;
+            flux += electrochemical_flux(z, c, c_top, charge_delta);
+            neighbor_count++;
+        }
+    }
+    
+    // Bottom neighbor
+    if (y + 1 < height) {
+        uint bottom_idx = cell_index + width;
+        if (solid_mask[bottom_idx] == 0) {
+            float c_bottom = src_conc[species_idx * cell_count + bottom_idx];
+            float bottom_net_charge = cell_net_charge(bottom_idx, cell_count);
+            float charge_delta = bottom_net_charge - current_net_charge;
+            float edge_scale = edge_charge_scale(z, charge_delta);
+            flux += (c_bottom - c) * edge_scale;
+            flux += electrochemical_flux(z, c, c_bottom, charge_delta);
+            neighbor_count++;
+        }
+    }
+    
+    // Explicit Euler update from the accumulated (diffusive + electrochemical)
+    // flux. Stability for 2D requires roughly D * dt < 0.25; the host scales
+    // substeps to honor this.
+    float new_c = c + D * dt * flux;
+
+    // Clamp away negative concentrations that round-off could introduce.
+    new_c = max(new_c, 0.0);
+    
+    dst_conc[species_idx * cell_count + cell_index] = new_c;
+}

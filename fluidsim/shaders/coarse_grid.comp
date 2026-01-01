@@ -1,0 +1,107 @@
+#version 450
+
+// Coarse grid averaging compute shader
+//
+// Downsamples the full-resolution concentration grid into a coarse grid by
+// averaging mip_factor x mip_factor blocks of fluid cells. Runs every frame
+// after diffusion; the coarse result stays on the GPU for async tooltip
+// readback. Solid cells are excluded from the averages, and the fluid count
+// and mean temperature are written once per coarse cell by species 0.
+//
+// Dispatch: (coarse_width, coarse_height, species_count)
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Push constants
+layout(push_constant) uniform PushConstants {
+    uint full_width;      // Full grid width
+    uint full_height;     // Full grid height
+    uint coarse_width;    // Coarse grid width (full_width / mip_factor)
+    uint coarse_height;   // Coarse grid height (full_height / mip_factor)
+    uint species_count;   // Number of species
+    uint mip_factor;      // Averaging block size (e.g., 8 for 8x8)
+    uint _pad[2];
+};
+
+// Binding 0: Full-resolution concentrations (read) - [species][cell]
+layout(set = 0, binding = 0) readonly buffer FullConcentrations {
+    float full_conc[];
+};
+
+// Binding 1: Full-resolution solid mask (read)
+layout(set = 0, binding = 1) readonly buffer SolidMask {
+    uint solid_mask[];
+};
+
+// Binding 2: Full-resolution temperatures (read)
+layout(set = 0, binding = 2) readonly buffer FullTemperatures {
+    float full_temperatures[];
+};
+
+// Binding 3: Coarse concentrations (write) - [species][coarse_cell]
+layout(set = 0, binding = 3) writeonly buffer CoarseConcentrations {
+    float coarse_conc[];
+};
+
+// Binding 4: Coarse fluid counts (write) - number of fluid cells per coarse cell
+layout(set = 0, binding = 4) writeonly buffer CoarseFluidCounts {
+    uint coarse_fluid_count[];
+};
+
+// Binding 5: Coarse mean temperatures (write)
+layout(set = 0, binding = 5) writeonly buffer CoarseTemperatures {
+    float coarse_temperature[];
+};
+
+void main() {
+    uint coarse_x = gl_GlobalInvocationID.x;
+    uint coarse_y = gl_GlobalInvocationID.y;
+    uint species_idx = gl_GlobalInvocationID.z;
+    
+    // Bounds check
+    if (coarse_x >= coarse_width || coarse_y >= coarse_height || species_idx >= species_count) {
+        return;
+    }
+    
+    uint coarse_cell_count = coarse_width * coarse_height;
+    uint full_cell_count = full_width * full_height;
+    uint coarse_idx = coarse_y * coarse_width + coarse_x;
+    
+    // Calculate the region in full resolution
+    uint start_x = coarse_x * mip_factor;
+    uint start_y = coarse_y * mip_factor;
+    uint end_x = min(start_x + mip_factor, full_width);
+    uint end_y = min(start_y + mip_factor, full_height);
+    
+    // Accumulate concentrations over the NxN block
+    float sum = 0.0;
+    float temperature_sum = 0.0;
+    uint fluid_count = 0;
+    
+    for (uint y = start_y; y < end_y; y++) {
+        for (uint x = start_x; x < end_x; x++) {
+            uint full_idx = y * full_width + x;
+            
+            // Only count fluid cells
+            if (solid_mask[full_idx] == 0) {
+                sum += full_conc[species_idx * full_cell_count + full_idx];
+                fluid_count++;
+                if (species_idx == 0) {
+                    temperature_sum += full_temperatures[full_idx];
+                }
+            }
+        }
+    }
+    
+    // Write averaged concentration (or 0 if no fluid cells)
+    float avg = (fluid_count > 0) ? (sum / float(fluid_count)) : 0.0;
+    coarse_conc[species_idx * coarse_cell_count + coarse_idx] = avg;
+    
+    // Only write fluid count once (from species 0)
+    if (species_idx == 0) {
+        coarse_fluid_count[coarse_idx] = fluid_count;
+        coarse_temperature[coarse_idx] = (fluid_count > 0)
+            ? (temperature_sum / float(fluid_count))
+            : 293.15;
+    }
+}
