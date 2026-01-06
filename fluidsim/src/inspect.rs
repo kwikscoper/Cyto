@@ -285,8 +285,9 @@ impl Inspector {
             }
         }
 
-        // Sort materials by fraction, highest first
-        materials.sort_by(|a, b| b.fraction.partial_cmp(&a.fraction).unwrap());
+        // Sort materials by fraction, highest first. `total_cmp` avoids the
+        // `partial_cmp().unwrap()` panic risk and mirrors the species sort.
+        materials.sort_by(|a, b| b.fraction.total_cmp(&a.fraction));
         let mean_temperature_kelvin = if temperature_samples > 0 {
             temperature_sum / temperature_samples as f64
         } else {
