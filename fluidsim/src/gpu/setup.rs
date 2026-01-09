@@ -61,7 +61,28 @@ impl GpuSimulation {
             .engine_version(vk::make_api_version(0, 1, 0, 0))
             .api_version(vk::API_VERSION_1_2);
 
-        let instance_info = vk::InstanceCreateInfo::default().application_info(&app_info);
+        // On portability platforms (e.g. macOS via MoltenVK) the loader hides
+        // non-conformant drivers unless we explicitly opt in with the
+        // portability-enumeration extension and flag. On native Vulkan drivers
+        // the extension is absent, so this collapses to the previous behavior.
+        let available_instance_exts =
+            unsafe { entry.enumerate_instance_extension_properties(None)? };
+        let has_portability_enumeration = available_instance_exts.iter().any(|ext| {
+            ext.extension_name_as_c_str()
+                .is_ok_and(|name| name == c"VK_KHR_portability_enumeration")
+        });
+
+        let mut instance_extensions: Vec<*const std::ffi::c_char> = Vec::new();
+        let mut instance_flags = vk::InstanceCreateFlags::empty();
+        if has_portability_enumeration {
+            instance_extensions.push(c"VK_KHR_portability_enumeration".as_ptr());
+            instance_flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
+        }
+
+        let instance_info = vk::InstanceCreateInfo::default()
+            .application_info(&app_info)
+            .flags(instance_flags)
+            .enabled_extension_names(&instance_extensions);
         let instance = unsafe { entry.create_instance(&instance_info, None)? };
 
         let physical_devices = unsafe { instance.enumerate_physical_devices()? };
@@ -101,8 +122,22 @@ impl GpuSimulation {
             .queue_family_index(compute_queue_family)
             .queue_priorities(&queue_priority);
 
-        let device_info =
-            vk::DeviceCreateInfo::default().queue_create_infos(std::slice::from_ref(&queue_info));
+        // Vulkan requires enabling VK_KHR_portability_subset on any device that
+        // advertises it (MoltenVK does); native drivers never expose it.
+        let available_device_exts =
+            unsafe { instance.enumerate_device_extension_properties(physical_device)? };
+        let mut device_extensions: Vec<*const std::ffi::c_char> = Vec::new();
+        let needs_portability_subset = available_device_exts.iter().any(|ext| {
+            ext.extension_name_as_c_str()
+                .is_ok_and(|name| name == c"VK_KHR_portability_subset")
+        });
+        if needs_portability_subset {
+            device_extensions.push(c"VK_KHR_portability_subset".as_ptr());
+        }
+
+        let device_info = vk::DeviceCreateInfo::default()
+            .queue_create_infos(std::slice::from_ref(&queue_info))
+            .enabled_extension_names(&device_extensions);
 
         let device = unsafe { instance.create_device(physical_device, &device_info, None)? };
         let queue = unsafe { device.get_device_queue(compute_queue_family, 0) };
