@@ -911,9 +911,13 @@ impl GpuSimulation {
             self.device.destroy_shader_module(leak_shader_module, None);
         }
 
+        // 2 sets × 3 STORAGE_BUFFER bindings each = 6 descriptors. The previous
+        // count of 4 under-sized the pool; lenient drivers ignored it, but
+        // strict ones (e.g. MoltenVK) reject the allocation with
+        // ERROR_OUT_OF_POOL_MEMORY.
         let pool_sizes = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(4)];
+            .descriptor_count(6)];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(2)
             .pool_sizes(&pool_sizes);
