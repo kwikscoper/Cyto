@@ -1,0 +1,35 @@
+[package]
+name = "renderer"
+version = "0.1.0"
+edition = "2024"
+description = "Vulkan visualization of concentration/temperature fields with an egui overlay"
+
+[lib]
+name = "renderer"
+path = "src/lib.rs"
+
+[dependencies]
+# Sibling crate whose live GPU buffers we bind for visualization
+fluidsim = { path = "../fluidsim" }
+
+# GPU / Vulkan + shader compilation
+ash.workspace = true
+gpu-allocator.workspace = true
+shaderc.workspace = true
+raw-window-handle.workspace = true
+
+# Windowing + immediate-mode GUI overlay
+winit.workspace = true
+egui.workspace = true
+egui-winit.workspace = true
+egui-ash-renderer.workspace = true
+
+# Math / data
+bytemuck.workspace = true
+glam.workspace = true
+
+# Diagnostics
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+parking_lot.workspace = true
