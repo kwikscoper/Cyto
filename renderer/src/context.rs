@@ -7,7 +7,7 @@ use ash::vk;
 use fluidsim::SharedGpuContext;
 use gpu_allocator::vulkan::Allocator;
 use parking_lot::Mutex;
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle};
 use std::sync::Arc;
 use winit::window::Window;
 
@@ -99,35 +99,53 @@ impl RenderContext {
             .engine_version(vk::make_api_version(0, 1, 0, 0))
             .api_version(vk::API_VERSION_1_2);
 
-        // Required extensions for windowing
-        let mut extensions = vec![ash::khr::surface::NAME.as_ptr()];
-
+        // Surface extensions for the current windowing backend. ash-window
+        // returns the right set per platform: X11/Wayland on Linux, and the
+        // Metal surface extension on macOS.
         let display_handle = window
             .display_handle()
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let raw_display_handle = display_handle.as_raw();
-        match raw_display_handle {
-            RawDisplayHandle::Xlib(_) => {
-                extensions.push(ash::khr::xlib_surface::NAME.as_ptr());
-            }
-            RawDisplayHandle::Wayland(_) => {
-                extensions.push(ash::khr::wayland_surface::NAME.as_ptr());
-            }
-            RawDisplayHandle::Xcb(_) => {
-                extensions.push(ash::khr::xcb_surface::NAME.as_ptr());
-            }
-            _ => bail!("Unsupported display handle type"),
+        let raw_window_handle = window
+            .window_handle()
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .as_raw();
+        let mut extensions =
+            ash_window::enumerate_required_extensions(raw_display_handle)?.to_vec();
+
+        // MoltenVK (macOS) is a non-conformant portability driver that the
+        // loader only enumerates when we opt in. On native Vulkan drivers the
+        // extension is absent, so this collapses to the previous behavior.
+        let available_instance_exts =
+            unsafe { entry.enumerate_instance_extension_properties(None)? };
+        let mut instance_flags = vk::InstanceCreateFlags::empty();
+        if available_instance_exts.iter().any(|ext| {
+            ext.extension_name_as_c_str()
+                .is_ok_and(|name| name == ash::khr::portability_enumeration::NAME)
+        }) {
+            extensions.push(ash::khr::portability_enumeration::NAME.as_ptr());
+            instance_flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
         }
 
         let instance_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
+            .flags(instance_flags)
             .enabled_extension_names(&extensions);
 
         let instance = unsafe { entry.create_instance(&instance_info, None)? };
         let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
 
-        // Create surface
-        let surface = create_surface(&entry, &instance, window)?;
+        // Create the surface. ash-window handles the per-platform details,
+        // including building a CAMetalLayer-backed Metal surface on macOS.
+        let surface = unsafe {
+            ash_window::create_surface(
+                &entry,
+                &instance,
+                raw_display_handle,
+                raw_window_handle,
+                None,
+            )?
+        };
 
         // Select physical device
         let physical_devices = unsafe { instance.enumerate_physical_devices()? };
@@ -175,7 +193,21 @@ impl RenderContext {
             .queue_family_index(graphics_queue_family)
             .queue_priorities(&queue_priority);
 
-        let device_extensions = [ash::khr::swapchain::NAME.as_ptr()];
+        let mut device_extensions = vec![ash::khr::swapchain::NAME.as_ptr()];
+
+        // Devices that advertise VK_KHR_portability_subset (MoltenVK) must have
+        // it enabled; native Vulkan drivers never expose it.
+        let available_device_exts = unsafe {
+            instance
+                .enumerate_device_extension_properties(physical_device)
+                .unwrap_or_default()
+        };
+        if available_device_exts.iter().any(|ext| {
+            ext.extension_name_as_c_str()
+                .is_ok_and(|name| name == ash::khr::portability_subset::NAME)
+        }) {
+            device_extensions.push(ash::khr::portability_subset::NAME.as_ptr());
+        }
 
         let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(std::slice::from_ref(&queue_info))
@@ -627,48 +659,3 @@ fn create_framebuffers(
         .collect()
 }
 
-/// Create a Vulkan surface from a window.
-///
-/// Only the Linux windowing backends (X11 via Xlib/Xcb, and Wayland) are wired
-/// up here. Other targets such as macOS (Metal surface via MoltenVK) are not
-/// handled and fall through to the error arm below.
-fn create_surface(
-    entry: &ash::Entry,
-    instance: &ash::Instance,
-    window: &Window,
-) -> Result<vk::SurfaceKHR> {
-    let display_handle = window
-        .display_handle()
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    let window_handle = window
-        .window_handle()
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    match (display_handle.as_raw(), window_handle.as_raw()) {
-        #[cfg(target_os = "linux")]
-        (RawDisplayHandle::Xlib(display), RawWindowHandle::Xlib(window)) => {
-            let loader = ash::khr::xlib_surface::Instance::new(entry, instance);
-            let info = vk::XlibSurfaceCreateInfoKHR::default()
-                .dpy(display.display.unwrap().as_ptr() as *mut _)
-                .window(window.window);
-            Ok(unsafe { loader.create_xlib_surface(&info, None)? })
-        }
-        #[cfg(target_os = "linux")]
-        (RawDisplayHandle::Wayland(display), RawWindowHandle::Wayland(window)) => {
-            let loader = ash::khr::wayland_surface::Instance::new(entry, instance);
-            let info = vk::WaylandSurfaceCreateInfoKHR::default()
-                .display(display.display.as_ptr())
-                .surface(window.surface.as_ptr());
-            Ok(unsafe { loader.create_wayland_surface(&info, None)? })
-        }
-        #[cfg(target_os = "linux")]
-        (RawDisplayHandle::Xcb(display), RawWindowHandle::Xcb(window)) => {
-            let loader = ash::khr::xcb_surface::Instance::new(entry, instance);
-            let info = vk::XcbSurfaceCreateInfoKHR::default()
-                .connection(display.connection.unwrap().as_ptr())
-                .window(window.window.get());
-            Ok(unsafe { loader.create_xcb_surface(&info, None)? })
-        }
-        _ => bail!("Unsupported platform for Vulkan surface creation"),
-    }
-}
