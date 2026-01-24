@@ -100,6 +100,25 @@ The demo ships with six scenarios:
 
 > Other platforms may work but are untested. Presentation behavior in particular depends on the windowing system.
 
+### macOS setup (Homebrew + workarounds)
+
+macOS has no native Vulkan driver, and a couple of current toolchain versions need small workarounds. The steps below are verified on Apple Silicon with Homebrew; on Intel Macs `brew --prefix` resolves to `/usr/local` instead of `/opt/homebrew`.
+
+Install the Vulkan runtime (loader + MoltenVK) and tools:
+
+```bash
+brew install molten-vk vulkan-loader vulkan-headers vulkan-tools
+```
+
+The loader and the MoltenVK ICD live under the Homebrew prefix and must be visible at runtime (for the demo and for the GPU tests):
+
+```bash
+export DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix)/lib"
+export VK_ICD_FILENAMES="$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json"
+```
+
+> Cyto already opts into the Vulkan portability extensions (`VK_KHR_portability_enumeration` / `VK_KHR_portability_subset`) when present, so MoltenVK is discovered automatically once the loader and ICD above are on the path.
+
 ### Build the Lean rule engine
 
 The simulation initializes the kinetics layer by default, so build the Lean executable before running the demo:
@@ -107,6 +126,15 @@ The simulation initializes the kinetics layer by default, so build the Lean exec
 ```bash
 cd lean
 lake build
+cd ..
+```
+
+On **macOS**, the pinned Lean toolchain (v4.16.0) produces a binary that fails to load on recent macOS with a `__DATA_CONST segment missing SG_READ_ONLY flag` dyld error. Relink against the toolchain's bundled libraries by building with:
+
+```bash
+cd lean
+LEAN_PREFIX="$(lean --print-prefix)"
+LEAN_CC=clang LIBRARY_PATH="$LEAN_PREFIX/lib:$LEAN_PREFIX/lib/lean" lake build
 cd ..
 ```
 
@@ -127,6 +155,12 @@ export CYTO_LEAN_BINARY=/absolute/path/to/cyto-rules
 
 ```bash
 cargo build --release
+```
+
+`fluidsim` compiles its shaders through `shaderc-sys`, which builds the bundled `shaderc` C++ library via CMake. With recent CMake (4.x), that build aborts with `Compatibility with CMake < 3.5 has been removed`. Until the dependency is updated, set the compatibility shim for the build (and for `cargo test`):
+
+```bash
+export CMAKE_POLICY_VERSION_MINIMUM=3.5
 ```
 
 ## Running the Demo
@@ -198,6 +232,16 @@ The `fluidsim` crate includes probe binaries and regression tests for the newer 
 Run them with:
 
 ```bash
+cargo test -p fluidsim
+```
+
+These tests dispatch real GPU work and invoke the Lean engine, so they need a working Vulkan device and the `cyto-rules` binary. On macOS, run them with the environment from the [macOS setup](#macos-setup-homebrew--workarounds) section plus the CMake shim:
+
+```bash
+CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix)/lib" \
+VK_ICD_FILENAMES="$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json" \
+CYTO_LEAN_BINARY="$PWD/lean/.lake/build/bin/cyto-rules" \
 cargo test -p fluidsim
 ```
 
